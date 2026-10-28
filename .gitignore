@@ -1,0 +1,5 @@
+.inject.pid
+HANDOFF.md
+test/.ud/
+test/*.log
+.DS_Store

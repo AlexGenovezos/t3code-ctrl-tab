@@ -1,0 +1,408 @@
+diff --git a/apps/web/src/components/AppSidebarLayout.tsx b/apps/web/src/components/AppSidebarLayout.tsx
+index 20abcf1e..6a172489 100644
+--- a/apps/web/src/components/AppSidebarLayout.tsx
++++ b/apps/web/src/components/AppSidebarLayout.tsx
+@@ -40,6 +40,7 @@ import {
+ import { BackgroundThreadAnnouncer } from "./BackgroundThreadAnnouncer";
+ import LegacyThreadSidebar from "./LegacySidebar";
+ import ThreadSidebar from "./Sidebar";
++import { ThreadSwitcher } from "./ThreadSwitcher";
+ import { SidebarBrandWidthProbe } from "./sidebar/SidebarChrome";
+ import { isAppModalPage } from "./sidebar/mainAppLocation";
+ import type { SidebarRouteReveal } from "./sidebar/routeReveal";
+@@ -479,6 +480,7 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
+         </Sidebar>
+         {children}
+         <BackgroundThreadAnnouncer />
++        <ThreadSwitcher />
+         <SidebarControl />
+       </SidebarProvider>
+     </PanelAnimationSuppressionProvider>
+diff --git a/apps/web/src/components/CommandPaletteThreadItems.tsx b/apps/web/src/components/CommandPaletteThreadItems.tsx
+index d106b4d1..78fa2886 100644
+--- a/apps/web/src/components/CommandPaletteThreadItems.tsx
++++ b/apps/web/src/components/CommandPaletteThreadItems.tsx
+@@ -44,7 +44,7 @@ import {
+   ThreadSearchPullRequestNumber,
+ } from "./ThreadStatusIndicators";
+ 
+-function useProviderEntryByEnvironmentAndInstanceId() {
++export function useProviderEntryByEnvironmentAndInstanceId() {
+   const { environments } = useEnvironments();
+   const primaryEnvironmentId = usePrimaryEnvironmentId();
+   const providers = useAtomValue(primaryServerProvidersAtom);
+diff --git a/packages/contracts/src/keybindings.ts b/packages/contracts/src/keybindings.ts
+index 1e7962c0..8674e055 100644
+--- a/packages/contracts/src/keybindings.ts
++++ b/packages/contracts/src/keybindings.ts
+@@ -40,6 +40,8 @@ const THREAD_KEYBINDING_COMMANDS = [
+   "thread.editQueuedMessage",
+   "thread.previous",
+   "thread.next",
++  "thread.switchRecent",
++  "thread.switchRecentReverse",
+   "thread.copyReference",
+   "thread.settle",
+   "thread.pin",
+diff --git a/packages/shared/src/keybindings.ts b/packages/shared/src/keybindings.ts
+index 32292c0f..0704675f 100644
+--- a/packages/shared/src/keybindings.ts
++++ b/packages/shared/src/keybindings.ts
+@@ -215,6 +215,8 @@ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
+   { key: "mod+o", command: "editor.openFavorite" },
+   { key: "mod+shift+[", command: "thread.previous" },
+   { key: "mod+shift+]", command: "thread.next" },
++  { key: "ctrl+tab", command: "thread.switchRecent" },
++  { key: "ctrl+shift+tab", command: "thread.switchRecentReverse" },
+   { key: "mod+shift+c", command: "thread.copyReference", when: "!terminalFocus" },
+   { key: "mod+shift+s", command: "thread.settle", when: "!terminalFocus" },
+   { key: "mod+shift+p", command: "thread.pin", when: "!terminalFocus" },
+diff --git a/apps/web/src/components/ThreadSwitcher.tsx b/apps/web/src/components/ThreadSwitcher.tsx
+new file mode 100644
+index 00000000..9a140e4e
+--- /dev/null
++++ b/apps/web/src/components/ThreadSwitcher.tsx
+@@ -0,0 +1,221 @@
++import { useAtomValue } from "@effect/atom-react";
++import {
++  parseScopedThreadKey,
++  scopedThreadKey,
++  scopeThreadRef,
++} from "@t3tools/client-runtime/environment";
++import { useNavigate } from "@tanstack/react-router";
++import { MessageSquareIcon } from "lucide-react";
++import { useEffect, useRef, useState } from "react";
++import { create } from "zustand";
++
++import { isCommandPaletteOpen } from "../commandPaletteBus";
++import { isElectron } from "../env";
++import { useThreadRouteRef } from "../hooks/useThreadRouteTarget";
++import { resolveShortcutCommand } from "../keybindings";
++import { cn } from "../lib/utils";
++import { textDirection } from "../textDirection";
++import { isTerminalFocused } from "../lib/terminalFocus";
++import { isModelPickerOpen } from "../modelPickerVisibility";
++import { readThreadShell, useQuietThreadShells } from "../state/entities";
++import { primaryServerKeybindingsAtom } from "../state/server";
++import { buildThreadRouteParams } from "../threadRoutes";
++import { ITEM_ICON_CLASS } from "./CommandPalette.logic";
++import { useEnvironmentLookups, useProjectLookups } from "./CommandPaletteLookups";
++import { CommandPaletteTitleIcon } from "./CommandPaletteResults";
++import { useProviderEntryByEnvironmentAndInstanceId } from "./CommandPaletteThreadItems";
++import { ProjectFavicon } from "./ProjectFavicon";
++import { ThreadCommandSubtitle } from "./ThreadCommandSubtitle";
++import { ThreadRowLeadingStatus, ThreadRowTrailingStatus } from "./ThreadStatusIndicators";
++import {
++  openThreadSwitcher,
++  recordRecentThread,
++  stepThreadSwitcher,
++  type ThreadSwitcherSession,
++} from "./ThreadSwitcher.logic";
++
++/** Scoped thread keys, most recently opened first, for this window's session. */
++const useRecentThreadsStore = create<{
++  readonly threadKeys: readonly string[];
++  readonly recordThreadOpened: (threadKey: string) => void;
++}>()((set) => ({
++  threadKeys: [],
++  recordThreadOpened: (threadKey) =>
++    set((state) => ({ threadKeys: recordRecentThread(state.threadKeys, threadKey) })),
++}));
++
++function isThreadAvailable(threadKey: string): boolean {
++  const ref = parseScopedThreadKey(threadKey);
++  return ref !== null && readThreadShell(ref) !== null;
++}
++
++/**
++ * Ctrl+Tab thread switching: holding the modifier and pressing the shortcut
++ * walks the most recently opened threads, and releasing the modifier opens the
++ * highlighted one. Browsers keep Ctrl+Tab for their own tabs, so the default
++ * binding only reaches the page in the desktop app.
++ */
++export function ThreadSwitcher() {
++  const routeThreadRef = useThreadRouteRef();
++  const routeThreadKey = routeThreadRef ? scopedThreadKey(routeThreadRef) : null;
++  const recordThreadOpened = useRecentThreadsStore((store) => store.recordThreadOpened);
++  const keybindings = useAtomValue(primaryServerKeybindingsAtom);
++  const navigate = useNavigate();
++  const [session, setSessionState] = useState<ThreadSwitcherSession | null>(null);
++  // Key listeners read the open session synchronously between renders.
++  const sessionRef = useRef(session);
++
++  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- records route visits into the recent-thread order the switcher walks
++  useEffect(() => {
++    if (routeThreadKey !== null) recordThreadOpened(routeThreadKey);
++  }, [recordThreadOpened, routeThreadKey]);
++
++  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- subscribes to window key events for the switcher shortcut and modifier release
++  useEffect(() => {
++    const setSession = (next: ThreadSwitcherSession | null) => {
++      sessionRef.current = next;
++      setSessionState(next);
++    };
++    const commit = () => {
++      const current = sessionRef.current;
++      setSession(null);
++      const targetKey = current?.threadKeys[current.index];
++      const ref = targetKey === undefined ? null : parseScopedThreadKey(targetKey);
++      if (ref === null || targetKey === routeThreadKey) return;
++      void navigate({ to: "/$environmentId/$threadId", params: buildThreadRouteParams(ref) });
++    };
++    const onKeyDown = (event: KeyboardEvent) => {
++      const current = sessionRef.current;
++      if (current !== null && event.key === "Escape") {
++        event.preventDefault();
++        event.stopPropagation();
++        setSession(null);
++        return;
++      }
++      if (current === null && (isCommandPaletteOpen() || isModelPickerOpen())) return;
++      const command = resolveShortcutCommand(event, keybindings, {
++        platform: navigator.platform,
++        context: { terminalFocus: isTerminalFocused(), isWeb: !isElectron, isDesktop: isElectron },
++      });
++      if (command !== "thread.switchRecent" && command !== "thread.switchRecentReverse") return;
++      const direction = command === "thread.switchRecent" ? "forward" : "reverse";
++      event.preventDefault();
++      event.stopPropagation();
++      setSession(
++        current !== null
++          ? stepThreadSwitcher(current, direction)
++          : openThreadSwitcher({
++              recentThreadKeys: useRecentThreadsStore.getState().threadKeys,
++              currentThreadKey: routeThreadKey,
++              isAvailable: isThreadAvailable,
++              direction,
++            }),
++      );
++    };
++    const onKeyUp = (event: KeyboardEvent) => {
++      if (sessionRef.current === null) return;
++      if (!event.ctrlKey && !event.metaKey && !event.altKey) commit();
++    };
++    const onBlur = () => setSession(null);
++    window.addEventListener("keydown", onKeyDown, true);
++    window.addEventListener("keyup", onKeyUp, true);
++    window.addEventListener("blur", onBlur);
++    return () => {
++      window.removeEventListener("keydown", onKeyDown, true);
++      window.removeEventListener("keyup", onKeyUp, true);
++      window.removeEventListener("blur", onBlur);
++    };
++  }, [keybindings, navigate, routeThreadKey]);
++
++  return session === null ? null : (
++    <ThreadSwitcherList session={session} currentThreadKey={routeThreadKey} />
++  );
++}
++
++// Mounted only while the switcher is open, so closed it subscribes to nothing.
++// Rows mirror the command palette's thread rows.
++function ThreadSwitcherList({
++  session,
++  currentThreadKey,
++}: {
++  session: ThreadSwitcherSession;
++  currentThreadKey: string | null;
++}) {
++  const threads = useQuietThreadShells();
++  const { projectByKey } = useProjectLookups();
++  const { projectEnvironmentLocationById } = useEnvironmentLookups();
++  const providerEntryByEnvironmentAndInstanceId = useProviderEntryByEnvironmentAndInstanceId();
++  const threadByKey = new Map(
++    threads.map(
++      (thread) =>
++        [scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)), thread] as const,
++    ),
++  );
++  return (
++    <div className="pointer-events-none fixed inset-0 z-50 flex flex-col items-center px-4 pt-16 sm:pt-24">
++      <ul
++        aria-label="Recent threads"
++        className="dialog-glass max-h-105 w-full max-w-xl overflow-y-auto rounded-2xl border p-2 text-foreground"
++      >
++        {session.threadKeys.map((threadKey, index) => {
++          const thread = threadByKey.get(threadKey);
++          if (!thread) return null;
++          const project = projectByKey.get(`${thread.environmentId}:${thread.projectId}`) ?? null;
++          const modelInstanceId =
++            thread.runtime?.providerInstanceId ?? thread.modelSelection.instanceId;
++          const providerEntry = providerEntryByEnvironmentAndInstanceId.get(
++            `${thread.environmentId}:${modelInstanceId}`,
++          );
++          const providerDisplayName =
++            thread.runtime?.providerName ?? providerEntry?.displayName ?? modelInstanceId;
++          return (
++            <li
++              key={threadKey}
++              data-active={index === session.index || undefined}
++              ref={
++                index === session.index
++                  ? (node) => node?.scrollIntoView({ block: "nearest" })
++                  : undefined
++              }
++              className={cn(
++                "flex min-h-8 select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm",
++                index === session.index && "bg-accent text-accent-foreground",
++              )}
++            >
++              <CommandPaletteTitleIcon>
++                {project ? (
++                  <ProjectFavicon project={project} className="size-4 shrink-0" />
++                ) : (
++                  <MessageSquareIcon className={ITEM_ICON_CLASS} />
++                )}
++              </CommandPaletteTitleIcon>
++              <span className="flex min-w-0 flex-1 flex-col">
++                <span className="flex min-w-0 items-center gap-1.5 text-foreground">
++                  <ThreadRowLeadingStatus thread={thread} />
++                  <span className="truncate" dir={textDirection(thread.title)}>
++                    {thread.title}
++                  </span>
++                </span>
++                <ThreadCommandSubtitle
++                  project={null}
++                  projectTitle={project?.title ?? null}
++                  environmentLabel={
++                    projectEnvironmentLocationById.get(thread.environmentId)?.label ?? "Remote"
++                  }
++                  branch={thread.branch}
++                  worktreePath={thread.worktreePath}
++                  isCurrent={threadKey === currentThreadKey}
++                  driverKind={providerEntry?.driverKind ?? null}
++                  providerDisplayName={providerDisplayName}
++                  acpRegistryAgentId={providerEntry?.acpRegistryAgentId}
++                  acpRegistryIconUrl={providerEntry?.acpRegistryIconUrl}
++                />
++              </span>
++              <ThreadRowTrailingStatus thread={thread} />
++            </li>
++          );
++        })}
++      </ul>
++    </div>
++  );
++}
+diff --git a/apps/web/src/components/ThreadSwitcher.logic.ts b/apps/web/src/components/ThreadSwitcher.logic.ts
+new file mode 100644
+index 00000000..4c2f5eea
+--- /dev/null
++++ b/apps/web/src/components/ThreadSwitcher.logic.ts
+@@ -0,0 +1,48 @@
++const RECENT_THREADS_LIMIT = 30;
++
++/** Moves `threadKey` to the front of the most-recently-opened list. */
++export function recordRecentThread(keys: readonly string[], threadKey: string): readonly string[] {
++  if (keys[0] === threadKey) return keys;
++  return [threadKey, ...keys.filter((key) => key !== threadKey)].slice(0, RECENT_THREADS_LIMIT);
++}
++
++export type ThreadSwitcherDirection = "forward" | "reverse";
++
++export interface ThreadSwitcherSession {
++  /** Thread keys in switcher order: the current thread (if any) first, then most recent. */
++  readonly threadKeys: readonly string[];
++  readonly index: number;
++}
++
++/**
++ * Opens the switcher on the thread the first press lands on: the previously
++ * opened thread going forward, the oldest one in reverse. Null when there is
++ * nowhere to switch to.
++ */
++export function openThreadSwitcher(input: {
++  readonly recentThreadKeys: readonly string[];
++  readonly currentThreadKey: string | null;
++  readonly isAvailable: (threadKey: string) => boolean;
++  readonly direction: ThreadSwitcherDirection;
++}): ThreadSwitcherSession | null {
++  const others = input.recentThreadKeys.filter(
++    (key) => key !== input.currentThreadKey && input.isAvailable(key),
++  );
++  if (others.length === 0) return null;
++  if (input.currentThreadKey === null || !input.isAvailable(input.currentThreadKey)) {
++    return { threadKeys: others, index: input.direction === "forward" ? 0 : others.length - 1 };
++  }
++  const threadKeys = [input.currentThreadKey, ...others];
++  return { threadKeys, index: stepIndex(0, threadKeys.length, input.direction) };
++}
++
++export function stepThreadSwitcher(
++  session: ThreadSwitcherSession,
++  direction: ThreadSwitcherDirection,
++): ThreadSwitcherSession {
++  return { ...session, index: stepIndex(session.index, session.threadKeys.length, direction) };
++}
++
++function stepIndex(index: number, length: number, direction: ThreadSwitcherDirection): number {
++  return (index + (direction === "forward" ? 1 : -1) + length) % length;
++}
+diff --git a/apps/web/src/components/ThreadSwitcher.logic.test.ts b/apps/web/src/components/ThreadSwitcher.logic.test.ts
+new file mode 100644
+index 00000000..c5e21602
+--- /dev/null
++++ b/apps/web/src/components/ThreadSwitcher.logic.test.ts
+@@ -0,0 +1,62 @@
++import { describe, expect, it } from "vite-plus/test";
++
++import { openThreadSwitcher, recordRecentThread, stepThreadSwitcher } from "./ThreadSwitcher.logic";
++
++const available = () => true;
++
++describe("recordRecentThread", () => {
++  it("moves a reopened thread to the front", () => {
++    expect(recordRecentThread(["a", "b", "c"], "c")).toEqual(["c", "a", "b"]);
++  });
++});
++
++describe("openThreadSwitcher", () => {
++  it("lands on the previous thread going forward and the oldest in reverse", () => {
++    const input = {
++      recentThreadKeys: ["cur", "a", "b"],
++      currentThreadKey: "cur",
++      isAvailable: available,
++    };
++    expect(openThreadSwitcher({ ...input, direction: "forward" })).toEqual({
++      threadKeys: ["cur", "a", "b"],
++      index: 1,
++    });
++    expect(openThreadSwitcher({ ...input, direction: "reverse" })?.index).toBe(2);
++  });
++
++  it("skips threads that no longer exist", () => {
++    expect(
++      openThreadSwitcher({
++        recentThreadKeys: ["cur", "gone", "a"],
++        currentThreadKey: "cur",
++        isAvailable: (key) => key !== "gone",
++        direction: "forward",
++      }),
++    ).toEqual({ threadKeys: ["cur", "a"], index: 1 });
++  });
++
++  it("starts at either end when no thread is open", () => {
++    const input = { recentThreadKeys: ["a", "b"], currentThreadKey: null, isAvailable: available };
++    expect(openThreadSwitcher({ ...input, direction: "forward" })?.index).toBe(0);
++    expect(openThreadSwitcher({ ...input, direction: "reverse" })?.index).toBe(1);
++  });
++
++  it("does not open with nothing to switch to", () => {
++    expect(
++      openThreadSwitcher({
++        recentThreadKeys: ["cur"],
++        currentThreadKey: "cur",
++        isAvailable: available,
++        direction: "forward",
++      }),
++    ).toBeNull();
++  });
++});
++
++describe("stepThreadSwitcher", () => {
++  it("wraps around in both directions", () => {
++    const session = { threadKeys: ["cur", "a", "b"], index: 2 };
++    expect(stepThreadSwitcher(session, "forward").index).toBe(0);
++    expect(stepThreadSwitcher({ ...session, index: 0 }, "reverse").index).toBe(2);
++  });
++});
