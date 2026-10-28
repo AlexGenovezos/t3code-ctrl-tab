@@ -129,10 +129,25 @@
     render();
   };
 
+  // Settled threads render after the Settled shelf header, or not at all while it's collapsed,
+  // so only rows above the header count. Null when the sidebar has no shelf to judge by.
+  const unsettledThreadKeys = () => {
+    const header = document.querySelector('[data-testid="sidebar-settled-header"]');
+    if (!header) return null;
+    const keys = new Set();
+    for (const li of document.querySelectorAll("li[data-thread-item]")) {
+      if (header.compareDocumentPosition(li) & Node.DOCUMENT_POSITION_PRECEDING) {
+        keys.add(li.getAttribute("data-thread-item"));
+      }
+    }
+    return keys;
+  };
+
   const open = (direction) => {
     scrapeAll();
     const current = currentThreadKey();
-    const others = mru.filter((k) => k !== current && meta[k]);
+    const unsettled = unsettledThreadKeys();
+    const others = mru.filter((k) => k !== current && meta[k] && (!unsettled || unsettled.has(k)));
     if (others.length === 0) return;
     if (current === null) {
       session = { keys: others, index: direction === 1 ? 0 : others.length - 1 };

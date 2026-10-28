@@ -8,6 +8,8 @@ A VS Code–style most-recently-used thread switcher for the [T3 Code](https://g
 
 Rows show the project's favicon, the thread title and the project name.
 
+Settled threads are left out: only threads above the sidebar's **Settled** shelf are offered. If you unsettle one, it comes back.
+
 This is an unofficial add-on. It does not modify the app: the official build keeps auto-updating as normal.
 
 ## How it works
@@ -49,7 +51,7 @@ The injector logs to `~/Library/Logs/t3-ctrl-tab.log`. Set `T3_CDP_PORT` to use 
 - **Restarts lose it.** If T3 Code is opened normally, or restarts itself after an update, the switcher isn't there. Quit and reopen through the launcher.
 - **Local programs can control the app.** While the debugging port is open, any process on your Mac can drive the app through it. It isn't reachable from the network.
 - **Only threads you've seen in the sidebar appear.** The switcher reads the sidebar for titles and icons. A deleted thread can stay in the list until it ages out of the last 30.
-- **App updates can break it.** It depends on T3 Code's sidebar markup (`li[data-thread-item]`) and hash routes (`#/<environmentId>/<threadId>`). If the app changes those, the switcher will need updating.
+- **App updates can break it.** It depends on T3 Code's sidebar markup (`li[data-thread-item]`, the `sidebar-settled-header` shelf) and hash routes (`#/<environmentId>/<threadId>`). If the app changes those, the switcher will need updating.
 
 ## Test
 

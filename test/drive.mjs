@@ -17,10 +17,11 @@ const tab = (mods = CTRL) => key("rawKeyDown", "Tab", "Tab", 9, mods).then(() =>
 const overlay = () => ev(`[...document.querySelectorAll('.t3ct-row')].map(r => (r.hasAttribute('data-active') ? '>' : ' ') + r.querySelector('.t3ct-title').textContent).join('|') || null`);
 const check = (name, got, want) => { const ok = JSON.stringify(got) === JSON.stringify(want); console.log(`${ok ? "PASS" : "FAIL"} ${name}: ${JSON.stringify(got)}${ok ? "" : ` (want ${JSON.stringify(want)})`}`); if (!ok) process.exitCode = 1; };
 
+await ev(`history.pushState(null, '', '#/env1/tS')`); await sleep(400);
 await ev(`history.pushState(null, '', '#/env1/tB')`); await sleep(400);
 await ev(`location.hash = '#/settings/general'`); await sleep(100);
 await ev(`location.hash = '#/env2/tC'`); await sleep(400);
-check("mru", await ev(`JSON.parse(localStorage.getItem('t3-ctrl-tab:mru'))`), ["env2:tC", "env1:tB", "env1:tA"]);
+check("mru", await ev(`JSON.parse(localStorage.getItem('t3-ctrl-tab:mru'))`), ["env2:tC", "env1:tB", "env1:tS", "env1:tA"]);
 
 await ev(`document.getElementById('ta').focus()`);
 await ctrlDown(); await tab();
