@@ -50,7 +50,7 @@ The injector logs to `~/Library/Logs/t3-ctrl-tab.log`. Set `T3_CDP_PORT` to use 
 
 - **Restarts lose it.** If T3 Code is opened normally, or restarts itself after an update, the switcher isn't there. Quit and reopen through the launcher.
 - **Local programs can control the app.** While the debugging port is open, any process on your Mac can drive the app through it. It isn't reachable from the network.
-- **Only threads you've seen in the sidebar appear.** The switcher reads the sidebar for titles and icons. A deleted thread can stay in the list until it ages out of the last 30.
+- **Only threads in the sidebar appear.** The switcher reads the sidebar for titles and icons and for which threads are still active, so settled, archived and deleted threads drop out automatically.
 - **App updates can break it.** It depends on T3 Code's sidebar markup (`li[data-thread-item]`, the `sidebar-settled-header` shelf) and hash routes (`#/<environmentId>/<threadId>`). If the app changes those, the switcher will need updating.
 
 ## Test
